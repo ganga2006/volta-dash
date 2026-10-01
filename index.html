@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VOLTA Guard</title>
+<script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>
+<style>
+:root{--bg:#0f1317;--card:#171d23;--line:#27303a;--tx:#e6edf3;--mut:#8b98a5;--ok:#3fb950;--bad:#f85149;--warn:#d29922;--acc:#58a6ff}
+@media(prefers-color-scheme:light){:root{--bg:#f4f6f8;--card:#fff;--line:#d8dee4;--tx:#1f2328;--mut:#59636e;--ok:#1a7f37;--bad:#cf222e;--warn:#9a6700;--acc:#0969da}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:16px}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:12px}
+h1{font-size:20px;margin:0}h2{font-size:14px;margin:0 0 10px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em}
+.chips{display:flex;flex-wrap:wrap;gap:8px}.chip{border:1px solid var(--line);background:var(--card);border-radius:99px;padding:3px 11px;font-size:13px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mut);margin-right:6px}
+.on .dot{background:var(--ok)}.off .dot{background:var(--bad)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+#alertbar{display:none;background:var(--bad);color:#fff;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-weight:600}
+#alertbar.show{display:block;animation:p 1s infinite alternate}@keyframes p{to{opacity:.65}}
+.live{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:16/9;display:grid;place-items:center}
+.live img{width:100%;height:100%;object-fit:contain;display:none}.live span{color:#9aa4ad}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+button,input{font:inherit;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--tx);padding:8px 12px}
+button{cursor:pointer}button.p{background:var(--acc);border-color:var(--acc);color:#fff}button.d{border-color:var(--bad);color:var(--bad)}
+input{min-width:0;flex:1}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.shot{border:1px solid var(--line);border-radius:10px;overflow:hidden;cursor:pointer;background:var(--bg)}
+.shot img{width:100%;aspect-ratio:4/3;object-fit:cover;display:block}.shot div{padding:6px 8px;font-size:12px;color:var(--mut)}
+.tag{font-weight:700}.intruder .tag,.fault .tag{color:var(--bad)}.update .tag{color:var(--warn)}.clear .tag{color:var(--ok)}
+ul{list-style:none;margin:0;padding:0}li{padding:7px 0;border-top:1px solid var(--line);font-size:13px}li:first-child{border-top:0}
+#modal{display:none;position:fixed;inset:0;background:#000d;place-items:center;z-index:9;padding:16px}#modal.show{display:grid}
+#modal img{max-width:100%;max-height:85vh;border-radius:8px}#modal p{color:#ddd;text-align:center;margin:8px}
+#setup label{display:block;font-size:13px;color:var(--mut);margin:8px 0 3px}.hint{font-size:12px;color:var(--mut);margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>VOLTA Guard</h1>
+  <div class="chips">
+    <span class="chip" id="cLink"><i class="dot"></i>broker</span>
+    <span class="chip" id="cPi"><i class="dot"></i>Pi</span>
+    <span class="chip" id="cArm">—</span>
+    <span class="chip" id="cDist" hidden>—</span>
+    <span class="chip" id="cInfo">—</span>
+  </div>
+</header>
+
+<div id="alertbar"></div>
+
+<section class="card" id="setup" hidden>
+  <h2>Connect</h2>
+  <label>Topic (from <code>python -m volta.guard secrets</code>)</label>
+  <input id="fTopic" placeholder="volta/0123456789abcdef" autocapitalize="off">
+  <label>PIN (only needed to disarm / silence — stays in this browser)</label>
+  <input id="fPin" inputmode="numeric" placeholder="123456">
+  <label>Broker WebSocket URL</label>
+  <input id="fUrl" value="wss://broker.hivemq.com:8884/mqtt">
+  <div class="row"><button class="p" id="bSave">Save &amp; connect</button></div>
+</section>
+
+<section class="card">
+  <h2>Live</h2>
+  <div class="live"><img id="liveImg" alt="live view"><span id="liveMsg">Press “Watch live”.</span></div>
+  <div class="row">
+    <button class="p" id="bLive">Watch live</button>
+    <button id="bSnap">Take picture</button>
+    <button id="bArm">Arm</button>
+    <button class="d" id="bDisarm">Disarm</button>
+    <button class="d" id="bSilence">Silence siren</button>
+    <button id="bCfg">Settings</button>
+  </div>
+  <div class="hint">Live view is a ~2 frames/second relay through the MQTT broker. It only runs while this page is open and “Watch live” is on.</div>
+</section>
+
+<section class="card">
+  <h2>Captured pictures</h2>
+  <div class="grid" id="grid"><span class="hint">No captures yet.</span></div>
+</section>
+
+<section class="card">
+  <h2>Events</h2>
+  <ul id="events"><li class="hint">Waiting for data…</li></ul>
+</section>
+</main>
+
+<div id="modal"><div><img id="mImg" alt=""><p id="mCap"></p><p><button id="mDl">Download</button> <button id="mClose">Close</button></p></div></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const store = {
+    get(k, d = "") { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} }
+  };
+  const hash = new URLSearchParams(location.hash.slice(1));
+  let topic = (hash.get("t") || store.get("topic")).replace(/^\/|\/$/g, "");
+  let pin = store.get("pin");
+  let url = store.get("url", "wss://broker.hivemq.com:8884/mqtt");
+  let client = null, watching = false, liveTimer = null, liveUrl = null, distT = null;
+  const slots = {};          // slot -> object URL of the retained picture
+  let history = [];
+
+  const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const when = ts => { try { return new Date(ts).toLocaleString(); } catch { return ts || ""; } };
+  const blobUrl = payload => URL.createObjectURL(new Blob([payload], { type: "image/jpeg" }));
+  const chip = (el, on, text) => { el.className = "chip " + (on ? "on" : "off"); el.innerHTML = `<i class="dot"></i>${text}`; };
+
+  function openSetup() { $("setup").hidden = false; $("fTopic").value = topic; $("fPin").value = pin; $("fUrl").value = url; }
+
+  function renderHistory() {
+    const withPic = history.filter(h => h.slot !== null && h.slot !== undefined).slice(0, 10);
+    $("grid").innerHTML = withPic.length ? "" : '<span class="hint">No captures yet.</span>';
+    for (const h of withPic) {
+      const u = slots[h.slot];
+      const d = document.createElement("div");
+      d.className = "shot " + h.level;
+      d.innerHTML = `${u ? `<img src="${u}" alt="">` : '<img alt="" style="background:#222">'}<div><span class="tag">${esc(h.level)}</span> #${esc(h.id)}<br>${esc(when(h.ts))}<br>${esc(h.reason)}</div>`;
+      d.onclick = () => u && openModal(u, `${h.level} · ${when(h.ts)} · ${h.reason}`);
+      $("grid").appendChild(d);
+    }
+    $("events").innerHTML = history.length ? history.map(h =>
+      `<li class="${esc(h.level)}"><span class="tag">${esc(h.level)}</span> ${esc(when(h.ts))} — ${esc(h.reason)}</li>`).join("")
+      : '<li class="hint">No events yet.</li>';
+  }
+
+  function openModal(u, cap) { $("mImg").src = u; $("mCap").textContent = cap; $("modal").classList.add("show"); $("mDl").onclick = () => { const a = document.createElement("a"); a.href = u; a.download = "volta-capture.jpg"; a.click(); }; }
+
+  function banner(a) {
+    const bar = $("alertbar");
+    if (a.level === "intruder" || a.level === "update" || a.level === "fault") {
+      bar.textContent = `${a.level === "fault" ? "FAULT" : "UNKNOWN PERSON"} — ${a.reason} (${when(a.ts)})`;
+      bar.classList.add("show");
+      try { navigator.vibrate && navigator.vibrate([300, 150, 300]); } catch {}
+    } else if (a.level === "clear") { bar.classList.remove("show"); }
+  }
+
+  function connect() {
+    if (client) { try { client.end(true); } catch {} client = null; }
+    if (!topic) { openSetup(); return; }
+    chip($("cLink"), false, "connecting…");
+    client = mqtt.connect(url, { clientId: "dash-" + Math.random().toString(16).slice(2, 10), reconnectPeriod: 3000, keepalive: 30, clean: true });
+    client.on("connect", () => {
+      chip($("cLink"), true, "broker");
+      client.subscribe([`${topic}/status`, `${topic}/state`, `${topic}/alert`, `${topic}/history`, `${topic}/live`, `${topic}/snap/+`, `${topic}/ack`, `${topic}/snapshot`, `${topic}/distance`], { qos: 0 });
+      if (watching) sendLive();
+    });
+    client.on("close", () => chip($("cLink"), false, "broker offline"));
+    client.on("error", () => chip($("cLink"), false, "broker error"));
+    client.on("message", (t, payload) => {
+      const sub = t.slice(topic.length + 1);
+      if (sub === "status") chip($("cPi"), String(payload) === "online", "Pi " + String(payload));
+      else if (sub === "state") {
+        try {
+          const s = JSON.parse(payload);
+          $("cArm").textContent = s.arming ? "arming…" : s.armed ? "ARMED" : "DISARMED";
+          $("cInfo").textContent = [s.alarm ? "ALARM" : "", s.night_light ? "light ON" : "", s.fps ? s.fps + " fps" : "", s.cpu_temp ? Math.round(s.cpu_temp) + "°C" : "", (s.enrolled || []).length + " known"].filter(Boolean).join(" · ");
+        } catch {}
+      } else if (sub === "alert") { try { banner(JSON.parse(payload)); } catch {} }
+      else if (sub === "distance") {
+        try {
+          const d = JSON.parse(payload); const el = $("cDist");
+          el.hidden = false; el.textContent = "person ~" + d.m.toFixed(1) + " m";
+          clearTimeout(distT); distT = setTimeout(() => { el.hidden = true; }, 5000);
+        } catch {}
+      }
+      else if (sub === "history") { try { history = JSON.parse(payload).items || []; renderHistory(); } catch {} }
+      else if (sub.startsWith("snap/")) { const n = +sub.slice(5); if (slots[n]) URL.revokeObjectURL(slots[n]); slots[n] = blobUrl(payload); renderHistory(); }
+      else if (sub === "live") {
+        const u = blobUrl(payload); $("liveImg").src = u; $("liveImg").style.display = "block"; $("liveMsg").style.display = "none";
+        if (liveUrl) URL.revokeObjectURL(liveUrl); liveUrl = u;
+      } else if (sub === "ack") { try { const a = JSON.parse(payload); toast(`${a.cmd}: ${a.ok ? "ok" : a.detail}`); } catch {} }
+    });
+  }
+
+  let toastT; function toast(m) { const s = $("liveMsg"); if (watching && $("liveImg").style.display === "block") return; s.style.display = "block"; s.textContent = m; clearTimeout(toastT); }
+  const cmd = (c, usePin) => { if (!client || !client.connected) return toast("not connected"); client.publish(`${topic}/cmd`, usePin ? `${c} ${pin}` : c, { qos: 1 }); };
+  function needPin(c) { if (!pin) { openSetup(); toast("enter your PIN in Settings first"); return; } cmd(c, true); }
+  const sendLive = () => cmd("live");
+
+  $("bLive").onclick = () => {
+    watching = !watching; $("bLive").textContent = watching ? "Stop live" : "Watch live";
+    clearInterval(liveTimer);
+    if (watching) { $("liveMsg").style.display = "block"; $("liveMsg").textContent = "Asking the Pi for frames…"; sendLive(); liveTimer = setInterval(sendLive, 15000); }
+    else { $("liveImg").style.display = "none"; $("liveMsg").style.display = "block"; $("liveMsg").textContent = "Live view stopped."; }
+  };
+  $("bSnap").onclick = () => cmd("snapshot");
+  $("bArm").onclick = () => cmd("arm");
+  $("bDisarm").onclick = () => needPin("disarm");
+  $("bSilence").onclick = () => needPin("silence");
+  $("bCfg").onclick = openSetup;
+  $("bSave").onclick = () => {
+    topic = $("fTopic").value.trim().replace(/^\/|\/$/g, ""); pin = $("fPin").value.trim(); url = $("fUrl").value.trim();
+    store.set("topic", topic); store.set("pin", pin); store.set("url", url);
+    $("setup").hidden = true; connect();
+  };
+  $("mClose").onclick = () => $("modal").classList.remove("show");
+  $("modal").onclick = e => { if (e.target.id === "modal") $("modal").classList.remove("show"); };
+  document.addEventListener("visibilitychange", () => { if (document.hidden && watching) $("bLive").click(); });
+
+  chip($("cPi"), false, "Pi ?");
+  if (hash.get("t")) store.set("topic", topic);
+  connect();
+})();
+</script>
+</body>
+</html>
