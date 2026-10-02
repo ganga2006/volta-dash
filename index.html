@@ -16,6 +16,15 @@ h1{font-size:20px;margin:0}h2{font-size:14px;margin:0 0 10px;color:var(--mut);te
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mut);margin-right:6px}
 .on .dot{background:var(--ok)}.off .dot{background:var(--bad)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+.now{display:grid;grid-template-columns:auto 1fr;gap:16px;align-items:center}
+.dist{font-size:44px;font-weight:800;line-height:1;min-width:120px;text-align:center}
+.dist small{display:block;font-size:12px;font-weight:600;color:var(--mut);margin-top:6px}
+.people{display:flex;flex-wrap:wrap;gap:8px}
+.pill{border-radius:99px;padding:6px 14px;font-weight:800;font-size:16px}
+.pill.known{background:#1a7f3722;color:var(--ok);border:2px solid var(--ok)}
+.pill.unknown{background:#cf222e22;color:var(--bad);border:2px solid var(--bad)}
+.pill.checking{background:#9a670022;color:var(--warn);border:2px solid var(--warn)}
+.sys{font-size:13px;color:var(--mut);margin-top:10px}.sys b{color:var(--tx)}
 #alertbar{display:none;background:var(--bad);color:#fff;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-weight:600}
 #alertbar.show{display:block;animation:p 1s infinite alternate}@keyframes p{to{opacity:.65}}
 .live{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:16/9;display:grid;place-items:center}
@@ -27,7 +36,7 @@ input{min-width:0;flex:1}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
 .shot{border:1px solid var(--line);border-radius:10px;overflow:hidden;cursor:pointer;background:var(--bg)}
 .shot img{width:100%;aspect-ratio:4/3;object-fit:cover;display:block}.shot div{padding:6px 8px;font-size:12px;color:var(--mut)}
-.tag{font-weight:700}.intruder .tag,.fault .tag{color:var(--bad)}.update .tag{color:var(--warn)}.clear .tag{color:var(--ok)}
+.tag{font-weight:700}.intruder .tag,.fault .tag,.passby .tag{color:var(--bad)}.start .tag{color:var(--acc)}.update .tag{color:var(--warn)}.clear .tag{color:var(--ok)}
 ul{list-style:none;margin:0;padding:0}li{padding:7px 0;border-top:1px solid var(--line);font-size:13px}li:first-child{border-top:0}
 #modal{display:none;position:fixed;inset:0;background:#000d;place-items:center;z-index:9;padding:16px}#modal.show{display:grid}
 #modal img{max-width:100%;max-height:85vh;border-radius:8px}#modal p{color:#ddd;text-align:center;margin:8px}
@@ -48,6 +57,17 @@ ul{list-style:none;margin:0;padding:0}li{padding:7px 0;border-top:1px solid var(
 </header>
 
 <div id="alertbar"></div>
+
+<section class="card" id="nowCard">
+  <h2>Right now</h2>
+  <div class="now">
+    <div class="dist" id="nowDist">—<small>distance</small></div>
+    <div>
+      <div class="people" id="nowPeople"><span class="hint">Nobody in view</span></div>
+      <div class="sys" id="nowSys">System: waiting for the Pi…</div>
+    </div>
+  </div>
+</section>
 
 <section class="card" id="setup" hidden>
   <h2>Connect</h2>
@@ -129,8 +149,9 @@ ul{list-style:none;margin:0;padding:0}li{padding:7px 0;border-top:1px solid var(
 
   function banner(a) {
     const bar = $("alertbar");
-    if (a.level === "intruder" || a.level === "update" || a.level === "fault") {
-      bar.textContent = `${a.level === "fault" ? "FAULT" : "UNKNOWN PERSON"} — ${a.reason} (${when(a.ts)})`;
+    if (["intruder", "update", "fault", "passby"].includes(a.level)) {
+      const title = { fault: "FAULT", passby: "PERSON RAN PAST" }[a.level] || "UNKNOWN PERSON";
+      bar.textContent = `${title} — ${a.reason} (${when(a.ts)})`;
       bar.classList.add("show");
       try { navigator.vibrate && navigator.vibrate([300, 150, 300]); } catch {}
     } else if (a.level === "clear") { bar.classList.remove("show"); }
@@ -143,34 +164,53 @@ ul{list-style:none;margin:0;padding:0}li{padding:7px 0;border-top:1px solid var(
     client = mqtt.connect(url, { clientId: "dash-" + Math.random().toString(16).slice(2, 10), reconnectPeriod: 3000, keepalive: 30, clean: true });
     client.on("connect", () => {
       chip($("cLink"), true, "broker");
-      client.subscribe([`${topic}/status`, `${topic}/state`, `${topic}/alert`, `${topic}/history`, `${topic}/live`, `${topic}/snap/+`, `${topic}/ack`, `${topic}/snapshot`, `${topic}/distance`], { qos: 0 });
+      client.subscribe([`${topic}/status`, `${topic}/state`, `${topic}/alert`, `${topic}/history`, `${topic}/live`, `${topic}/snap/+`, `${topic}/ack`, `${topic}/snapshot`, `${topic}/distance`, `${topic}/presence`], { qos: 0 });
       if (watching) sendLive();
     });
     client.on("close", () => chip($("cLink"), false, "broker offline"));
     client.on("error", () => chip($("cLink"), false, "broker error"));
     client.on("message", (t, payload) => {
       const sub = t.slice(topic.length + 1);
-      if (sub === "status") chip($("cPi"), String(payload) === "online", "Pi " + String(payload));
+      const text = () => (typeof payload === "string" ? payload : new TextDecoder().decode(payload));
+      if (sub === "status") chip($("cPi"), text() === "online", "Pi " + text());
       else if (sub === "state") {
         try {
-          const s = JSON.parse(payload);
+          const s = JSON.parse(text());
           $("cArm").textContent = s.arming ? "arming…" : s.armed ? "ARMED" : "DISARMED";
-          $("cInfo").textContent = [s.alarm ? "ALARM" : "", s.night_light ? "light ON" : "", s.fps ? s.fps + " fps" : "", s.cpu_temp ? Math.round(s.cpu_temp) + "°C" : "", (s.enrolled || []).length + " known"].filter(Boolean).join(" · ");
+          if (s.started) {
+            const up = Math.max(0, (Date.now() - new Date(s.started)) / 1000);
+            const h = Math.floor(up / 3600), m = Math.floor(up % 3600 / 60);
+            $("nowSys").innerHTML = `System started <b>${esc(when(s.started))}</b> · up <b>${h}h ${m}m</b> · ${s.armed ? "<b>armed</b>" : "disarmed"}`;
+          }
+          $("cInfo").textContent = [s.alarm ? "ALARM" : "", s.night_light ? "light ON" : "", s.patrol ? "cam " + s.patrol + (s.pan != null ? " " + s.pan + "°" : "") : "", s.fps ? s.fps + " fps" : "", s.cpu_temp ? Math.round(s.cpu_temp) + "°C" : "", (s.enrolled || []).length + " known"].filter(Boolean).join(" · ");
         } catch {}
-      } else if (sub === "alert") { try { banner(JSON.parse(payload)); } catch {} }
+      } else if (sub === "alert") { try { banner(JSON.parse(text())); } catch {} }
+      else if (sub === "presence") {
+        try {
+          const p = JSON.parse(text());
+          const box = $("nowPeople");
+          box.innerHTML = p.people.length ? p.people.map(x =>
+            x.status === "known" ? `<span class="pill known">${esc(x.name)} ✓</span>` :
+            x.status === "unknown" ? `<span class="pill unknown">UNKNOWN PERSON</span>` :
+            `<span class="pill checking">checking face…</span>`).join("")
+            : '<span class="hint">Nobody in view</span>';
+          $("nowDist").innerHTML = (p.distance_m != null ? p.distance_m.toFixed(1) + " m" : "—") + "<small>distance</small>";
+          $("nowCard").style.borderColor = p.alarm ? "var(--bad)" : "";
+        } catch {}
+      }
       else if (sub === "distance") {
         try {
-          const d = JSON.parse(payload); const el = $("cDist");
+          const d = JSON.parse(text()); const el = $("cDist");
           el.hidden = false; el.textContent = "person ~" + d.m.toFixed(1) + " m";
           clearTimeout(distT); distT = setTimeout(() => { el.hidden = true; }, 5000);
         } catch {}
       }
-      else if (sub === "history") { try { history = JSON.parse(payload).items || []; renderHistory(); } catch {} }
+      else if (sub === "history") { try { history = JSON.parse(text()).items || []; renderHistory(); } catch {} }
       else if (sub.startsWith("snap/")) { const n = +sub.slice(5); if (slots[n]) URL.revokeObjectURL(slots[n]); slots[n] = blobUrl(payload); renderHistory(); }
       else if (sub === "live") {
         const u = blobUrl(payload); $("liveImg").src = u; $("liveImg").style.display = "block"; $("liveMsg").style.display = "none";
         if (liveUrl) URL.revokeObjectURL(liveUrl); liveUrl = u;
-      } else if (sub === "ack") { try { const a = JSON.parse(payload); toast(`${a.cmd}: ${a.ok ? "ok" : a.detail}`); } catch {} }
+      } else if (sub === "ack") { try { const a = JSON.parse(text()); toast(`${a.cmd}: ${a.ok ? "ok" : a.detail}`); } catch {} }
     });
   }
 
